@@ -1,0 +1,16 @@
+trialnr	image	imgtime
+0	domino01.jpg	16634.16073857661	option B
+1	domino02.jpg	54369.22051077272	option C
+2	domino03.jpg	27138.226418526756	option B
+3	domino04.jpg	9736.32320075194	option B
+4	domino05.jpg	54729.87629472482	option C
+5	domino06.jpg	37077.27295486984	option A
+6	figuras01.jpg	15353.329449837474	option B
+7	figuras02.jpg	36170.812155713094	option D
+8	figuras03.jpg	12579.11114997475	option D
+9	figuras04.jpg	46592.6742300762	option A
+10	kohs01.jpg	24446.692694542464	option A
+11	kohs02.jpg	27020.374592637352	option A
+12	kohs03.jpg	6122.863931250293	option A
+13	kohs04.jpg	17738.73122576333	option D
+14	kohs05.jpg	31754.42129471415	option B
