@@ -1,0 +1,37 @@
+{
+  "model": "deng",
+  "best_epoch": 5,
+  "best_val_subject_auc": 0.75,
+  "test_trial_metrics": {
+    "auc": 0.4938055879461326,
+    "balanced_accuracy": 0.4844559526259231,
+    "f1": 0.5428571428571428,
+    "sensitivity": 0.5962343096234309,
+    "specificity": 0.3726775956284153
+  },
+  "test_subject_metrics": {
+    "auc": 0.5,
+    "balanced_accuracy": 0.375,
+    "f1": 0.46153846153846156,
+    "sensitivity": 0.75,
+    "specificity": 0.0
+  },
+  "n_test_trials": 1871,
+  "n_test_subjects": 10,
+  "args": {
+    "model": "deng",
+    "data": "multimodal_trials.pkl",
+    "epochs": 25,
+    "batch_size": 16,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "pupil_len": 512,
+    "gaze_len": 512,
+    "num_workers": 0,
+    "seed": 42,
+    "patience": 7,
+    "device": "cuda",
+    "outdir": "runs",
+    "choi_all_pupil_rows": false
+  }
+}

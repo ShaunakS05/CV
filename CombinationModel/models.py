@@ -1,6 +1,5 @@
 import math
-from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,11 +10,8 @@ import torch.nn.functional as F
 # helpers
 # ============================================================
 
+
 def masked_mean(x: torch.Tensor, mask: Optional[torch.Tensor], dim: int = -1, eps: float = 1e-8):
-    """
-    x:    (..., T)
-    mask: same broadcastable shape as x, values in {0,1}
-    """
     if mask is None:
         return x.mean(dim=dim)
     num = (x * mask).sum(dim=dim)
@@ -24,10 +20,6 @@ def masked_mean(x: torch.Tensor, mask: Optional[torch.Tensor], dim: int = -1, ep
 
 
 def masked_global_avg_pool_1d(x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-    """
-    x:    (B, C, T)
-    mask: (B, 1, T) or (B, C, T)
-    """
     if mask is None:
         return x.mean(dim=-1)
     if mask.shape[1] == 1 and x.shape[1] != 1:
@@ -38,18 +30,37 @@ def masked_global_avg_pool_1d(x: torch.Tensor, mask: Optional[torch.Tensor] = No
 
 
 def make_random_keep_mask(obs_mask: torch.Tensor, keep_prob: float = 0.85):
-    """
-    obs_mask: (B, 1, T), 1 where originally observed
-    returns keep mask over observed points
-    """
     rand = torch.rand_like(obs_mask)
-    keep = (rand < keep_prob).float()
-    return keep * obs_mask
+    keep = ((rand < keep_prob).float() * obs_mask).float()
+
+    B, _, _ = keep.shape
+    for b in range(B):
+        if obs_mask[b].sum() > 0 and keep[b].sum() == 0:
+            first_idx = torch.nonzero(obs_mask[b, 0] > 0.5, as_tuple=False)[0, 0]
+            keep[b, 0, first_idx] = 1.0
+
+    return keep
+
+
+def resize_sequence_and_mask(
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    target_len: int,
+    mode: str = "linear",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if x.shape[-1] == target_len:
+        return x, mask
+
+    x_resized = F.interpolate(x, size=target_len, mode=mode, align_corners=False)
+    mask_resized = F.interpolate(mask.float(), size=target_len, mode="nearest")
+    mask_resized = (mask_resized > 0.5).float()
+    return x_resized, mask_resized
 
 
 # ============================================================
 # temporal building blocks
 # ============================================================
+
 
 class ConvBlock1D(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 5, dilation: int = 1, dropout: float = 0.1):
@@ -89,21 +100,99 @@ class TCNEncoder(nn.Module):
         return self.net(x)
 
 
+class TemporalFusionBlock(nn.Module):
+    def __init__(self, d_model: int, kernel_size: int = 5, dropout: float = 0.1):
+        super().__init__()
+        self.block = ConvBlock1D(d_model, d_model, kernel_size=kernel_size, dilation=1, dropout=dropout)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.block(x.transpose(1, 2)).transpose(1, 2)
+        return self.norm(y)
+
+
+class PositionalEncoding1D(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 4096):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.pe[:, : x.shape[1], :]
+
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, expansion: int = 4):
+        super().__init__()
+        hidden = d_model * expansion
+        self.net = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d_model),
+            nn.Dropout(dropout),
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x + self.net(x))
+
+
+class CrossModalInteractionBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.pupil_to_gaze = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.gaze_to_pupil = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+
+        self.norm_p = nn.LayerNorm(d_model)
+        self.norm_g = nn.LayerNorm(d_model)
+
+        self.ff_p = FeedForwardBlock(d_model, dropout=dropout)
+        self.ff_g = FeedForwardBlock(d_model, dropout=dropout)
+
+    def forward(
+        self,
+        p: torch.Tensor,
+        g: torch.Tensor,
+        p_key_padding_mask: Optional[torch.Tensor] = None,
+        g_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        p_from_g, attn_pg = self.pupil_to_gaze(
+            query=p,
+            key=g,
+            value=g,
+            key_padding_mask=g_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        g_from_p, attn_gp = self.gaze_to_pupil(
+            query=g,
+            key=p,
+            value=p,
+            key_padding_mask=p_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+
+        p = self.norm_p(p + p_from_g)
+        g = self.norm_g(g + g_from_p)
+
+        p = self.ff_p(p)
+        g = self.ff_g(g)
+
+        return p, g, attn_pg, attn_gp
+
+
 # ============================================================
 # 1) Choi-style model
 # ============================================================
 
-class ChoiPupilNet(nn.Module):
-    """
-    Input expected from ChoiDataset:
-      pupil           : (B, 1, T)
-      pupil_obs_mask  : (B, 1, T)
 
-    Idea:
-    - encode pupil + mask
-    - reconstruct pupil sequence
-    - classify ADHD
-    """
+class ChoiPupilNet(nn.Module):
     def __init__(
         self,
         hidden_channels=(64, 128, 128),
@@ -113,7 +202,6 @@ class ChoiPupilNet(nn.Module):
     ):
         super().__init__()
 
-        # channels: [pupil, observed_mask]
         self.encoder = TCNEncoder(
             in_ch=2,
             channels=hidden_channels,
@@ -137,12 +225,12 @@ class ChoiPupilNet(nn.Module):
         )
 
     def forward(self, pupil: torch.Tensor, pupil_obs_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
-        x = torch.cat([pupil, pupil_obs_mask], dim=1)  # (B,2,T)
-        feat = self.encoder(x)                         # (B,C,T)
+        x = torch.cat([pupil, pupil_obs_mask], dim=1)
+        feat = self.encoder(x)
 
-        recon = self.recon_head(feat)                 # (B,1,T)
+        recon = self.recon_head(feat)
         pooled = masked_global_avg_pool_1d(feat, pupil_obs_mask)
-        logits = self.cls_head(pooled).squeeze(-1)    # (B,)
+        logits = self.cls_head(pooled).squeeze(-1)
 
         return {
             "logits": logits,
@@ -156,10 +244,8 @@ def choi_loss(
     outputs: Dict[str, torch.Tensor],
     batch: Dict[str, torch.Tensor],
     recon_weight: float = 1.0,
+    pos_weight: Optional[torch.Tensor] = None,
 ):
-    """
-    Classification + reconstruction on originally observed points.
-    """
     logits = outputs["logits"]
     recon = outputs["recon"]
 
@@ -167,9 +253,8 @@ def choi_loss(
     obs_mask = batch["pupil_obs_mask"]
     labels = batch["label"]
 
-    cls_loss = F.binary_cross_entropy_with_logits(logits, labels)
+    cls_loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
 
-    # reconstruction only where original values were observed
     recon_err = (recon - pupil) ** 2
     recon_loss = masked_mean(recon_err, obs_mask, dim=-1).mean()
 
@@ -185,15 +270,8 @@ def choi_loss(
 # 2) Deng-style model
 # ============================================================
 
-class DengGazeNet(nn.Module):
-    """
-    Input expected from DengDataset:
-      gaze           : (B, C, T) where C is 4 if [x,y,dx,dy]
-      gaze_obs_mask  : (B, 1, T)
 
-    This is Deng-inspired for your dataset.
-    It does NOT include stimulus saliency/video context.
-    """
+class DengGazeNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 4,
@@ -205,7 +283,7 @@ class DengGazeNet(nn.Module):
         super().__init__()
 
         self.encoder = TCNEncoder(
-            in_ch=in_channels + 1,   # add observation mask as channel
+            in_ch=in_channels + 1,
             channels=hidden_channels,
             kernel_size=kernel_size,
             dropout=dropout,
@@ -220,8 +298,7 @@ class DengGazeNet(nn.Module):
         )
 
     def forward(self, gaze: torch.Tensor, gaze_obs_mask: torch.Tensor) -> Dict[str, torch.Tensor]:
-        mask_ch = gaze_obs_mask.expand(-1, 1, gaze.shape[-1])
-        x = torch.cat([gaze, mask_ch], dim=1)
+        x = torch.cat([gaze, gaze_obs_mask], dim=1)
         feat = self.encoder(x)
         pooled = masked_global_avg_pool_1d(feat, gaze_obs_mask)
         logits = self.cls_head(pooled).squeeze(-1)
@@ -236,10 +313,11 @@ class DengGazeNet(nn.Module):
 def deng_loss(
     outputs: Dict[str, torch.Tensor],
     batch: Dict[str, torch.Tensor],
+    pos_weight: Optional[torch.Tensor] = None,
 ):
     logits = outputs["logits"]
     labels = batch["label"]
-    cls_loss = F.binary_cross_entropy_with_logits(logits, labels)
+    cls_loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
     return {
         "loss": cls_loss,
         "cls_loss": cls_loss.detach(),
@@ -247,84 +325,110 @@ def deng_loss(
 
 
 # ============================================================
-# 3) Fusion model
+# 3) Tuned hybrid multimodal model
 # ============================================================
-
-class GatedFusion(nn.Module):
-    def __init__(self, dim_p: int, dim_g: int, fused_dim: int = 128, dropout: float = 0.1):
-        super().__init__()
-        self.proj_p = nn.Linear(dim_p, fused_dim)
-        self.proj_g = nn.Linear(dim_g, fused_dim)
-
-        self.gate = nn.Sequential(
-            nn.Linear(dim_p + dim_g, fused_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(fused_dim, fused_dim),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, z_p: torch.Tensor, z_g: torch.Tensor):
-        p = self.proj_p(z_p)
-        g = self.proj_g(z_g)
-        alpha = self.gate(torch.cat([z_p, z_g], dim=-1))
-        fused = alpha * p + (1.0 - alpha) * g
-        return fused, alpha
 
 
 class FusionADHDNet(nn.Module):
-    """
-    Input expected from FusionDataset:
-      pupil, pupil_obs_mask, gaze, gaze_obs_mask
-
-    Pupil branch keeps the Choi-style auxiliary reconstruction head.
-    Gaze branch is Deng-inspired.
-    Fusion is late gated fusion.
-    """
     def __init__(
         self,
         pupil_hidden=(64, 128, 128),
         gaze_hidden=(64, 128, 128),
         kernel_size: int = 5,
-        dropout: float = 0.1,
+        dropout: float = 0.15,
         gaze_in_channels: int = 4,
-        fused_dim: int = 128,
+        d_model: int = 64,
+        num_heads: int = 2,
+        num_cross_blocks: int = 1,
+        fusion_len: int = 192,
         classifier_hidden: int = 128,
+        add_positional_encoding: bool = True,
     ):
         super().__init__()
 
-        # pupil branch
+        self.fusion_len = fusion_len
+
         self.pupil_encoder = TCNEncoder(
             in_ch=2,
             channels=pupil_hidden,
             kernel_size=kernel_size,
             dropout=dropout,
         )
-        cp = self.pupil_encoder.out_channels
-
-        self.pupil_recon_head = nn.Sequential(
-            nn.Conv1d(cp, cp // 2, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(cp // 2, 1, kernel_size=1),
-        )
-
-        # gaze branch
         self.gaze_encoder = TCNEncoder(
             in_ch=gaze_in_channels + 1,
             channels=gaze_hidden,
             kernel_size=kernel_size,
             dropout=dropout,
         )
+
+        cp = self.pupil_encoder.out_channels
         cg = self.gaze_encoder.out_channels
 
-        self.fusion = GatedFusion(cp, cg, fused_dim=fused_dim, dropout=dropout)
+        self.pupil_proj = nn.Conv1d(cp, d_model, kernel_size=1)
+        self.gaze_proj = nn.Conv1d(cg, d_model, kernel_size=1)
+
+        self.pos_enc = PositionalEncoding1D(d_model, max_len=max(4096, fusion_len)) if add_positional_encoding else nn.Identity()
+
+        self.cross_blocks = nn.ModuleList(
+            [CrossModalInteractionBlock(d_model=d_model, num_heads=num_heads, dropout=dropout) for _ in range(num_cross_blocks)]
+        )
+
+        self.joint_reduce = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.temporal_fusion = TemporalFusionBlock(d_model=d_model, kernel_size=kernel_size, dropout=dropout)
+
+        self.unimodal_summary = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.hybrid_gate = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid(),
+        )
+
+        self.pupil_recon_head = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(d_model, 1, kernel_size=1),
+        )
 
         self.cls_head = nn.Sequential(
-            nn.Linear(fused_dim, classifier_hidden),
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, classifier_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(classifier_hidden, 1),
         )
+
+    def _make_key_padding_mask(self, obs_mask: torch.Tensor) -> torch.Tensor:
+        return ~(obs_mask.squeeze(1) > 0.5)
+
+    def _fix_all_masked_sequence(
+        self,
+        seq: torch.Tensor,
+        mask: torch.Tensor,
+        key_padding_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        all_masked = key_padding_mask.all(dim=1)
+
+        if all_masked.any():
+            seq = seq.clone()
+            mask = mask.clone()
+            key_padding_mask = key_padding_mask.clone()
+
+            seq[all_masked, 0, :] = 0.0
+            mask[all_masked, 0, 0] = 1.0
+            key_padding_mask[all_masked, 0] = False
+
+        return seq, mask, key_padding_mask
 
     def forward(
         self,
@@ -333,48 +437,118 @@ class FusionADHDNet(nn.Module):
         gaze: torch.Tensor,
         gaze_obs_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        # pupil branch
         p_in = torch.cat([pupil, pupil_obs_mask], dim=1)
+        g_in = torch.cat([gaze, gaze_obs_mask], dim=1)
+
         p_feat = self.pupil_encoder(p_in)
-        p_recon = self.pupil_recon_head(p_feat)
-        z_p = masked_global_avg_pool_1d(p_feat, pupil_obs_mask)
-
-        # gaze branch
-        g_in = torch.cat([gaze, gaze_obs_mask.expand(-1, 1, gaze.shape[-1])], dim=1)
         g_feat = self.gaze_encoder(g_in)
-        z_g = masked_global_avg_pool_1d(g_feat, gaze_obs_mask)
 
-        z_fused, alpha = self.fusion(z_p, z_g)
-        logits = self.cls_head(z_fused).squeeze(-1)
+        p_feat = self.pupil_proj(p_feat)
+        g_feat = self.gaze_proj(g_feat)
+
+        p_feat, p_mask = resize_sequence_and_mask(p_feat, pupil_obs_mask, self.fusion_len)
+        g_feat, g_mask = resize_sequence_and_mask(g_feat, gaze_obs_mask, self.fusion_len)
+
+        p_seq = self.pos_enc(p_feat.transpose(1, 2))
+        g_seq = self.pos_enc(g_feat.transpose(1, 2))
+
+        p_seq = torch.nan_to_num(p_seq, nan=0.0, posinf=0.0, neginf=0.0)
+        g_seq = torch.nan_to_num(g_seq, nan=0.0, posinf=0.0, neginf=0.0)
+
+        p_key_padding_mask = self._make_key_padding_mask(p_mask)
+        g_key_padding_mask = self._make_key_padding_mask(g_mask)
+
+        p_seq, p_mask, p_key_padding_mask = self._fix_all_masked_sequence(
+            p_seq, p_mask, p_key_padding_mask
+        )
+        g_seq, g_mask, g_key_padding_mask = self._fix_all_masked_sequence(
+            g_seq, g_mask, g_key_padding_mask
+        )
+
+        attn_pg_all = []
+        attn_gp_all = []
+
+        for block in self.cross_blocks:
+            p_seq, g_seq, attn_pg, attn_gp = block(
+                p_seq,
+                g_seq,
+                p_key_padding_mask=p_key_padding_mask,
+                g_key_padding_mask=g_key_padding_mask,
+            )
+            p_seq = torch.nan_to_num(p_seq, nan=0.0, posinf=0.0, neginf=0.0)
+            g_seq = torch.nan_to_num(g_seq, nan=0.0, posinf=0.0, neginf=0.0)
+            attn_pg_all.append(attn_pg)
+            attn_gp_all.append(attn_gp)
+
+        joint_seq = self.joint_reduce(torch.cat([p_seq, g_seq], dim=-1))
+        joint_seq = self.temporal_fusion(joint_seq)
+        joint_seq = torch.nan_to_num(joint_seq, nan=0.0, posinf=0.0, neginf=0.0)
+
+        joint_mask = (p_mask * g_mask).float()
+        joint_mask = torch.where(
+            joint_mask.sum(dim=-1, keepdim=True) > 0,
+            joint_mask,
+            torch.maximum(p_mask, g_mask),
+        )
+
+        p_interaction_feat = p_seq.transpose(1, 2)
+        pupil_recon_sync = self.pupil_recon_head(p_interaction_feat)
+        pupil_recon = F.interpolate(
+            pupil_recon_sync,
+            size=pupil.shape[-1],
+            mode="linear",
+            align_corners=False,
+        )
+        pupil_recon = torch.nan_to_num(pupil_recon, nan=0.0, posinf=0.0, neginf=0.0)
+
+        joint_feat = joint_seq.transpose(1, 2)
+        joint_pooled = masked_global_avg_pool_1d(joint_feat, joint_mask)
+        p_summary = masked_global_avg_pool_1d(p_feat, p_mask)
+        g_summary = masked_global_avg_pool_1d(g_feat, g_mask)
+        residual_summary = self.unimodal_summary(torch.cat([p_summary, g_summary], dim=-1))
+
+        gate = self.hybrid_gate(torch.cat([joint_pooled, residual_summary], dim=-1))
+        pooled = gate * joint_pooled + (1.0 - gate) * residual_summary
+
+        pooled = torch.nan_to_num(pooled, nan=0.0, posinf=0.0, neginf=0.0)
+        logits = self.cls_head(pooled).squeeze(-1)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
 
         return {
             "logits": logits,
-            "pupil_recon": p_recon,
+            "pupil_recon": pupil_recon,
             "pupil_feat": p_feat,
             "gaze_feat": g_feat,
-            "z_p": z_p,
-            "z_g": z_g,
-            "z_fused": z_fused,
-            "fusion_gate": alpha,
+            "pupil_seq_after_cross": p_seq,
+            "gaze_seq_after_cross": g_seq,
+            "joint_seq": joint_seq,
+            "joint_pooled": joint_pooled,
+            "residual_summary": residual_summary,
+            "hybrid_gate": gate,
+            "pooled": pooled,
+            "attn_pupil_to_gaze": attn_pg_all,
+            "attn_gaze_to_pupil": attn_gp_all,
+            "joint_mask": joint_mask,
         }
 
 
 def fusion_loss(
     outputs: Dict[str, torch.Tensor],
     batch: Dict[str, torch.Tensor],
-    recon_weight: float = 0.5,
+    recon_weight: float = 0.15,
+    pos_weight: Optional[torch.Tensor] = None,
 ):
     logits = outputs["logits"]
     pupil_recon = outputs["pupil_recon"]
 
     labels = batch["label"]
-    pupil = batch["pupil"]
-    pupil_obs_mask = batch["pupil_obs_mask"]
+    target_pupil = batch.get("pupil_recon_target", batch["pupil"])
+    recon_mask = batch.get("pupil_recon_target_mask", batch["pupil_obs_mask"])
 
-    cls_loss = F.binary_cross_entropy_with_logits(logits, labels)
+    cls_loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
 
-    recon_err = (pupil_recon - pupil) ** 2
-    recon_loss = masked_mean(recon_err, pupil_obs_mask, dim=-1).mean()
+    recon_err = (pupil_recon - target_pupil) ** 2
+    recon_loss = masked_mean(recon_err, recon_mask, dim=-1).mean()
 
     total = cls_loss + recon_weight * recon_loss
     return {
@@ -385,71 +559,26 @@ def fusion_loss(
 
 
 # ============================================================
-# 4) optional masked-imputation training helper
+# 4) masked-imputation helper for the joint model
 # ============================================================
 
-def apply_training_mask_to_pupil(pupil: torch.Tensor, obs_mask: torch.Tensor, keep_prob: float = 0.85):
-    """
-    For a stronger Choi-style setup, randomly hide some originally observed points.
-    Returns:
-      masked_pupil_input
-      keep_mask          (what remains visible)
-      target_mask        (what was hidden from visible observed points)
-    """
+
+def apply_training_mask_to_pupil(pupil: torch.Tensor, obs_mask: torch.Tensor, keep_prob: float = 0.90):
     keep_mask = make_random_keep_mask(obs_mask, keep_prob=keep_prob)
     target_mask = (obs_mask - keep_mask).clamp_min(0.0)
     masked_pupil = pupil * keep_mask
     return masked_pupil, keep_mask, target_mask
 
 
-# ============================================================
-# 5) smoke test
-# ============================================================
+def prepare_masked_fusion_batch(batch: Dict[str, torch.Tensor], keep_prob: float = 0.90) -> Dict[str, torch.Tensor]:
+    pupil = batch["pupil"]
+    obs_mask = batch["pupil_obs_mask"]
 
-if __name__ == "__main__":
-    B, Tp, Tg = 8, 512, 512
+    masked_pupil, keep_mask, target_mask = apply_training_mask_to_pupil(pupil, obs_mask, keep_prob=keep_prob)
 
-    pupil = torch.randn(B, 1, Tp)
-    pupil_mask = torch.ones(B, 1, Tp)
-
-    gaze = torch.randn(B, 4, Tg)
-    gaze_mask = torch.ones(B, 1, Tg)
-
-    labels = torch.randint(0, 2, (B,)).float()
-
-    batch_choi = {
-        "pupil": pupil,
-        "pupil_obs_mask": pupil_mask,
-        "label": labels,
-    }
-
-    batch_deng = {
-        "gaze": gaze,
-        "gaze_obs_mask": gaze_mask,
-        "label": labels,
-    }
-
-    batch_fusion = {
-        "pupil": pupil,
-        "pupil_obs_mask": pupil_mask,
-        "gaze": gaze,
-        "gaze_obs_mask": gaze_mask,
-        "label": labels,
-    }
-
-    m1 = ChoiPupilNet()
-    o1 = m1(batch_choi["pupil"], batch_choi["pupil_obs_mask"])
-    print("Choi logits:", o1["logits"].shape, "recon:", o1["recon"].shape)
-
-    m2 = DengGazeNet()
-    o2 = m2(batch_deng["gaze"], batch_deng["gaze_obs_mask"])
-    print("Deng logits:", o2["logits"].shape)
-
-    m3 = FusionADHDNet()
-    o3 = m3(
-        batch_fusion["pupil"],
-        batch_fusion["pupil_obs_mask"],
-        batch_fusion["gaze"],
-        batch_fusion["gaze_obs_mask"],
-    )
-    print("Fusion logits:", o3["logits"].shape, "pupil_recon:", o3["pupil_recon"].shape)
+    out = dict(batch)
+    out["pupil_recon_target"] = pupil
+    out["pupil_recon_target_mask"] = target_mask
+    out["pupil"] = masked_pupil
+    out["pupil_obs_mask"] = keep_mask
+    return out

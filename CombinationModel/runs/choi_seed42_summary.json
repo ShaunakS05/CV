@@ -1,0 +1,37 @@
+{
+  "model": "choi",
+  "best_epoch": 1,
+  "best_val_subject_auc": 0.75,
+  "test_trial_metrics": {
+    "auc": 0.6238705215263964,
+    "balanced_accuracy": 0.5,
+    "f1": 0.6763353378139371,
+    "sensitivity": 1.0,
+    "specificity": 0.0
+  },
+  "test_subject_metrics": {
+    "auc": 0.7083333333333333,
+    "balanced_accuracy": 0.5,
+    "f1": 0.5714285714285714,
+    "sensitivity": 1.0,
+    "specificity": 0.0
+  },
+  "n_test_trials": 1871,
+  "n_test_subjects": 10,
+  "args": {
+    "model": "choi",
+    "data": "multimodal_trials.pkl",
+    "epochs": 25,
+    "batch_size": 16,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "pupil_len": 512,
+    "gaze_len": 512,
+    "num_workers": 0,
+    "seed": 42,
+    "patience": 7,
+    "device": "cuda",
+    "outdir": "runs",
+    "choi_all_pupil_rows": false
+  }
+}

@@ -16,6 +16,14 @@ def _safe_len(x):
     return len(x) if isinstance(x, np.ndarray) else 0
 
 
+def _has_enough_finite(x, min_len=1, min_finite=10):
+    return (
+        isinstance(x, np.ndarray)
+        and len(x) >= min_len
+        and np.isfinite(np.asarray(x)).sum() >= min_finite
+    )
+
+
 def load_pickle_df(pkl_path="multimodal_trials.pkl"):
     df = pd.read_pickle(pkl_path).copy()
     return df
@@ -26,13 +34,14 @@ def build_fair_comparison_df(
     min_pupil_len=1000,
     min_gaze_len=1000,
     max_gaze_len=20000,
+    min_finite=10,
 ):
     """
     Fair comparison subset:
     - valid pupil
     - valid gaze
     - remove extreme gaze outliers
-    This is the subset you should use for Choi vs Deng vs Fusion comparisons.
+    - require enough finite values so preprocessing doesn't create empty masks
     """
     pupil_len = df["pupil"].apply(_safe_len)
     gaze_len = df["gaze_x"].apply(_safe_len)
@@ -41,9 +50,9 @@ def build_fair_comparison_df(
         (pupil_len >= min_pupil_len)
         & (gaze_len >= min_gaze_len)
         & (gaze_len <= max_gaze_len)
-        & df["pupil"].apply(lambda x: _has_array(x, min_pupil_len))
-        & df["gaze_x"].apply(lambda x: _has_array(x, min_gaze_len))
-        & df["gaze_y"].apply(lambda x: _has_array(x, min_gaze_len))
+        & df["pupil"].apply(lambda x: _has_enough_finite(x, min_pupil_len, min_finite))
+        & df["gaze_x"].apply(lambda x: _has_enough_finite(x, min_gaze_len, min_finite))
+        & df["gaze_y"].apply(lambda x: _has_enough_finite(x, min_gaze_len, min_finite))
     )
 
     out = df.loc[keep].copy().reset_index(drop=True)
@@ -53,6 +62,7 @@ def build_fair_comparison_df(
 def build_pupil_only_df(
     df,
     min_pupil_len=1000,
+    min_finite=10,
 ):
     """
     Broader Choi-only subset if you want to use all usable pupil rows.
@@ -61,7 +71,7 @@ def build_pupil_only_df(
     pupil_len = df["pupil"].apply(_safe_len)
     keep = (
         (pupil_len >= min_pupil_len)
-        & df["pupil"].apply(lambda x: _has_array(x, min_pupil_len))
+        & df["pupil"].apply(lambda x: _has_enough_finite(x, min_pupil_len, min_finite))
     )
     out = df.loc[keep].copy().reset_index(drop=True)
     return out
@@ -238,8 +248,8 @@ class ChoiDataset(Dataset):
         )
 
         return {
-            "pupil": torch.tensor(pupil[None, :], dtype=torch.float32),           # (1, T)
-            "pupil_obs_mask": torch.tensor(pupil_obs_mask[None, :], dtype=torch.float32),  # (1, T)
+            "pupil": torch.tensor(pupil[None, :], dtype=torch.float32),
+            "pupil_obs_mask": torch.tensor(pupil_obs_mask[None, :], dtype=torch.float32),
             "label": torch.tensor(float(row["label"]), dtype=torch.float32),
             "subject_id": torch.tensor(int(row["subject_id"]), dtype=torch.long),
             "trial": torch.tensor(int(row["trial"]), dtype=torch.long),
@@ -270,8 +280,8 @@ class DengDataset(Dataset):
         )
 
         return {
-            "gaze": torch.tensor(gaze, dtype=torch.float32),                     # (C, T)
-            "gaze_obs_mask": torch.tensor(gaze_obs_mask[None, :], dtype=torch.float32),  # (1, T)
+            "gaze": torch.tensor(gaze, dtype=torch.float32),
+            "gaze_obs_mask": torch.tensor(gaze_obs_mask[None, :], dtype=torch.float32),
             "label": torch.tensor(float(row["label"]), dtype=torch.float32),
             "subject_id": torch.tensor(int(row["subject_id"]), dtype=torch.long),
             "trial": torch.tensor(int(row["trial"]), dtype=torch.long),
@@ -307,9 +317,9 @@ class FusionDataset(Dataset):
         )
 
         return {
-            "pupil": torch.tensor(pupil[None, :], dtype=torch.float32),          # (1, Tp)
+            "pupil": torch.tensor(pupil[None, :], dtype=torch.float32),
             "pupil_obs_mask": torch.tensor(pupil_obs_mask[None, :], dtype=torch.float32),
-            "gaze": torch.tensor(gaze, dtype=torch.float32),                      # (Cg, Tg)
+            "gaze": torch.tensor(gaze, dtype=torch.float32),
             "gaze_obs_mask": torch.tensor(gaze_obs_mask[None, :], dtype=torch.float32),
             "label": torch.tensor(float(row["label"]), dtype=torch.float32),
             "subject_id": torch.tensor(int(row["subject_id"]), dtype=torch.long),

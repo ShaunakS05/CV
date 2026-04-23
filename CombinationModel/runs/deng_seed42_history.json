@@ -1,0 +1,134 @@
+[
+  {
+    "epoch": 1,
+    "train_loss": 0.6065688108461834,
+    "val_loss": 0.5270249385764634,
+    "train_subject_auc": 0.8464285714285714,
+    "val_subject_auc": 0.0,
+    "train_subject_balanced_accuracy": 0.5,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.6961460160297477,
+    "val_trial_auc": 0.3149180720418705
+  },
+  {
+    "epoch": 2,
+    "train_loss": 0.5782010034931174,
+    "val_loss": 0.5587452015151149,
+    "train_subject_auc": 0.9142857142857143,
+    "val_subject_auc": 0.25,
+    "train_subject_balanced_accuracy": 0.5,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.7159268679593973,
+    "val_trial_auc": 0.33866520712892967
+  },
+  {
+    "epoch": 3,
+    "train_loss": 0.5588246118320328,
+    "val_loss": 0.6042498250802358,
+    "train_subject_auc": 0.9249999999999999,
+    "val_subject_auc": 0.25,
+    "train_subject_balanced_accuracy": 0.725,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.754423664571261,
+    "val_trial_auc": 0.3319912427735778
+  },
+  {
+    "epoch": 4,
+    "train_loss": 0.5446442285806422,
+    "val_loss": 0.5944613982801852,
+    "train_subject_auc": 0.9678571428571429,
+    "val_subject_auc": 0.25,
+    "train_subject_balanced_accuracy": 0.7142857142857143,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.7872162887380594,
+    "val_trial_auc": 0.4267574316696883
+  },
+  {
+    "epoch": 5,
+    "train_loss": 0.525548574624381,
+    "val_loss": 0.5676830842875052,
+    "train_subject_auc": 0.9642857142857142,
+    "val_subject_auc": 0.75,
+    "train_subject_balanced_accuracy": 0.7964285714285715,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.8148042136393252,
+    "val_trial_auc": 0.5227653679061335
+  },
+  {
+    "epoch": 6,
+    "train_loss": 0.5077183089341633,
+    "val_loss": 0.5027903523566066,
+    "train_subject_auc": 0.9892857142857143,
+    "val_subject_auc": 0.25,
+    "train_subject_balanced_accuracy": 0.5,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.8334793781226704,
+    "val_trial_auc": 0.4568261895802689
+  },
+  {
+    "epoch": 7,
+    "train_loss": 0.4917955474613996,
+    "val_loss": 0.5619990138903909,
+    "train_subject_auc": 1.0,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 0.8571428571428572,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.8574824009609299,
+    "val_trial_auc": 0.4772619984264359
+  },
+  {
+    "epoch": 8,
+    "train_loss": 0.4724075371274772,
+    "val_loss": 0.9133360848046731,
+    "train_subject_auc": 0.9964285714285714,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 0.875,
+    "val_subject_balanced_accuracy": 0.625,
+    "train_trial_auc": 0.863363801165187,
+    "val_trial_auc": 0.45287175452399686
+  },
+  {
+    "epoch": 9,
+    "train_loss": 0.44921259912414857,
+    "val_loss": 0.46394051352272864,
+    "train_subject_auc": 1.0,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 0.6785714285714286,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.8861176114416431,
+    "val_trial_auc": 0.5233947935552288
+  },
+  {
+    "epoch": 10,
+    "train_loss": 0.4362270490677197,
+    "val_loss": 0.4959154501017453,
+    "train_subject_auc": 0.9964285714285714,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 0.7857142857142857,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.8964169949143674,
+    "val_trial_auc": 0.49147196661307435
+  },
+  {
+    "epoch": 11,
+    "train_loss": 0.41112224551188753,
+    "val_loss": 0.530655358472596,
+    "train_subject_auc": 1.0,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 0.9285714285714286,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.9048467483015312,
+    "val_trial_auc": 0.5172510518934081
+  },
+  {
+    "epoch": 12,
+    "train_loss": 0.407679821512991,
+    "val_loss": 0.5943074321401292,
+    "train_subject_auc": 1.0,
+    "val_subject_auc": 0.5,
+    "train_subject_balanced_accuracy": 1.0,
+    "val_subject_balanced_accuracy": 0.5,
+    "train_trial_auc": 0.9238201811815607,
+    "val_trial_auc": 0.5249136250128279
+  }
+]
