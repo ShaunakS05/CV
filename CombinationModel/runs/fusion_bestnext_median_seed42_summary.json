@@ -1,0 +1,46 @@
+{
+  "model": "fusion",
+  "best_epoch": 2,
+  "best_val_subject_auc": 1.0,
+  "best_threshold": 0.1,
+  "subject_agg": "median",
+  "topk": 3,
+  "test_trial_metrics": {
+    "auc": 0.7488672967328589,
+    "balanced_accuracy": 0.5919651390342693,
+    "f1": 0.6988660226795465,
+    "sensitivity": 0.9213732004429679,
+    "specificity": 0.2625570776255708
+  },
+  "test_subject_metrics": {
+    "auc": 0.8333333333333333,
+    "balanced_accuracy": 0.5833333333333334,
+    "f1": 0.6153846153846154,
+    "sensitivity": 1.0,
+    "specificity": 0.16666666666666666
+  },
+  "n_test_trials": 1779,
+  "n_test_subjects": 10,
+  "args": {
+    "model": "fusion",
+    "data": "multimodal_trials.pkl",
+    "epochs": 25,
+    "batch_size": 16,
+    "lr": 0.0002,
+    "weight_decay": 0.0001,
+    "pupil_len": 512,
+    "gaze_len": 512,
+    "num_workers": 0,
+    "seed": 42,
+    "patience": 10,
+    "device": "cuda",
+    "outdir": "runs",
+    "choi_all_pupil_rows": false,
+    "use_pos_weight": true,
+    "fusion_keep_prob": 0.92,
+    "fusion_recon_weight": 0.08,
+    "subject_agg": "median",
+    "topk": 3,
+    "min_specificity": 0.0
+  }
+}

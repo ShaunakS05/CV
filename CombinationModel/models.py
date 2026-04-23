@@ -29,7 +29,7 @@ def masked_global_avg_pool_1d(x: torch.Tensor, mask: Optional[torch.Tensor] = No
     return num / den
 
 
-def make_random_keep_mask(obs_mask: torch.Tensor, keep_prob: float = 0.85):
+def make_random_keep_mask(obs_mask: torch.Tensor, keep_prob: float = 0.90):
     rand = torch.rand_like(obs_mask)
     keep = ((rand < keep_prob).float() * obs_mask).float()
 
@@ -142,25 +142,25 @@ class FeedForwardBlock(nn.Module):
         return self.norm(x + self.net(x))
 
 
-class CrossModalInteractionBlock(nn.Module):
+class PupilDominantCrossBlock(nn.Module):
+    """
+    Pupil-dominant interaction:
+    pupil attends to gaze, while gaze stays as a contextual encoder output.
+    This matches the observed data where pupil seems to carry the stronger signal.
+    """
+
     def __init__(self, d_model: int, num_heads: int = 2, dropout: float = 0.1):
         super().__init__()
         self.pupil_to_gaze = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-        self.gaze_to_pupil = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-
         self.norm_p = nn.LayerNorm(d_model)
-        self.norm_g = nn.LayerNorm(d_model)
-
         self.ff_p = FeedForwardBlock(d_model, dropout=dropout)
-        self.ff_g = FeedForwardBlock(d_model, dropout=dropout)
 
     def forward(
         self,
         p: torch.Tensor,
         g: torch.Tensor,
-        p_key_padding_mask: Optional[torch.Tensor] = None,
         g_key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         p_from_g, attn_pg = self.pupil_to_gaze(
             query=p,
             key=g,
@@ -169,22 +169,9 @@ class CrossModalInteractionBlock(nn.Module):
             need_weights=True,
             average_attn_weights=False,
         )
-        g_from_p, attn_gp = self.gaze_to_pupil(
-            query=g,
-            key=p,
-            value=p,
-            key_padding_mask=p_key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,
-        )
-
         p = self.norm_p(p + p_from_g)
-        g = self.norm_g(g + g_from_p)
-
         p = self.ff_p(p)
-        g = self.ff_g(g)
-
-        return p, g, attn_pg, attn_gp
+        return p, attn_pg
 
 
 # ============================================================
@@ -325,13 +312,14 @@ def deng_loss(
 
 
 # ============================================================
-# 3) Tuned hybrid multimodal model
+# 3) Best-next hybrid multimodal model with metadata branch
 # ============================================================
 
 
 class FusionADHDNet(nn.Module):
     def __init__(
         self,
+        meta_dim: int,
         pupil_hidden=(64, 128, 128),
         gaze_hidden=(64, 128, 128),
         kernel_size: int = 5,
@@ -347,6 +335,7 @@ class FusionADHDNet(nn.Module):
         super().__init__()
 
         self.fusion_len = fusion_len
+        self.meta_dim = meta_dim
 
         self.pupil_encoder = TCNEncoder(
             in_ch=2,
@@ -370,7 +359,7 @@ class FusionADHDNet(nn.Module):
         self.pos_enc = PositionalEncoding1D(d_model, max_len=max(4096, fusion_len)) if add_positional_encoding else nn.Identity()
 
         self.cross_blocks = nn.ModuleList(
-            [CrossModalInteractionBlock(d_model=d_model, num_heads=num_heads, dropout=dropout) for _ in range(num_cross_blocks)]
+            [PupilDominantCrossBlock(d_model=d_model, num_heads=num_heads, dropout=dropout) for _ in range(num_cross_blocks)]
         )
 
         self.joint_reduce = nn.Sequential(
@@ -385,7 +374,24 @@ class FusionADHDNet(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
         )
+
+        self.meta_encoder = nn.Sequential(
+            nn.Linear(meta_dim, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+        )
+
         self.hybrid_gate = nn.Sequential(
+            nn.Linear(3 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid(),
+        )
+
+        self.meta_gate = nn.Sequential(
             nn.Linear(2 * d_model, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -436,6 +442,7 @@ class FusionADHDNet(nn.Module):
         pupil_obs_mask: torch.Tensor,
         gaze: torch.Tensor,
         gaze_obs_mask: torch.Tensor,
+        meta: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         p_in = torch.cat([pupil, pupil_obs_mask], dim=1)
         g_in = torch.cat([gaze, gaze_obs_mask], dim=1)
@@ -455,8 +462,8 @@ class FusionADHDNet(nn.Module):
         p_seq = torch.nan_to_num(p_seq, nan=0.0, posinf=0.0, neginf=0.0)
         g_seq = torch.nan_to_num(g_seq, nan=0.0, posinf=0.0, neginf=0.0)
 
-        p_key_padding_mask = self._make_key_padding_mask(p_mask)
         g_key_padding_mask = self._make_key_padding_mask(g_mask)
+        p_key_padding_mask = self._make_key_padding_mask(p_mask)
 
         p_seq, p_mask, p_key_padding_mask = self._fix_all_masked_sequence(
             p_seq, p_mask, p_key_padding_mask
@@ -466,19 +473,14 @@ class FusionADHDNet(nn.Module):
         )
 
         attn_pg_all = []
-        attn_gp_all = []
-
         for block in self.cross_blocks:
-            p_seq, g_seq, attn_pg, attn_gp = block(
+            p_seq, attn_pg = block(
                 p_seq,
                 g_seq,
-                p_key_padding_mask=p_key_padding_mask,
                 g_key_padding_mask=g_key_padding_mask,
             )
             p_seq = torch.nan_to_num(p_seq, nan=0.0, posinf=0.0, neginf=0.0)
-            g_seq = torch.nan_to_num(g_seq, nan=0.0, posinf=0.0, neginf=0.0)
             attn_pg_all.append(attn_pg)
-            attn_gp_all.append(attn_gp)
 
         joint_seq = self.joint_reduce(torch.cat([p_seq, g_seq], dim=-1))
         joint_seq = self.temporal_fusion(joint_seq)
@@ -507,8 +509,12 @@ class FusionADHDNet(nn.Module):
         g_summary = masked_global_avg_pool_1d(g_feat, g_mask)
         residual_summary = self.unimodal_summary(torch.cat([p_summary, g_summary], dim=-1))
 
-        gate = self.hybrid_gate(torch.cat([joint_pooled, residual_summary], dim=-1))
-        pooled = gate * joint_pooled + (1.0 - gate) * residual_summary
+        gate = self.hybrid_gate(torch.cat([joint_pooled, residual_summary, p_summary], dim=-1))
+        fused = gate * joint_pooled + (1.0 - gate) * residual_summary
+
+        meta_emb = self.meta_encoder(meta)
+        meta_gate = self.meta_gate(torch.cat([fused, meta_emb], dim=-1))
+        pooled = meta_gate * fused + (1.0 - meta_gate) * meta_emb
 
         pooled = torch.nan_to_num(pooled, nan=0.0, posinf=0.0, neginf=0.0)
         logits = self.cls_head(pooled).squeeze(-1)
@@ -520,14 +526,15 @@ class FusionADHDNet(nn.Module):
             "pupil_feat": p_feat,
             "gaze_feat": g_feat,
             "pupil_seq_after_cross": p_seq,
-            "gaze_seq_after_cross": g_seq,
+            "gaze_seq_context": g_seq,
             "joint_seq": joint_seq,
             "joint_pooled": joint_pooled,
             "residual_summary": residual_summary,
+            "meta_emb": meta_emb,
             "hybrid_gate": gate,
+            "meta_gate": meta_gate,
             "pooled": pooled,
             "attn_pupil_to_gaze": attn_pg_all,
-            "attn_gaze_to_pupil": attn_gp_all,
             "joint_mask": joint_mask,
         }
 
@@ -535,7 +542,7 @@ class FusionADHDNet(nn.Module):
 def fusion_loss(
     outputs: Dict[str, torch.Tensor],
     batch: Dict[str, torch.Tensor],
-    recon_weight: float = 0.15,
+    recon_weight: float = 0.08,
     pos_weight: Optional[torch.Tensor] = None,
 ):
     logits = outputs["logits"]
@@ -563,14 +570,14 @@ def fusion_loss(
 # ============================================================
 
 
-def apply_training_mask_to_pupil(pupil: torch.Tensor, obs_mask: torch.Tensor, keep_prob: float = 0.90):
+def apply_training_mask_to_pupil(pupil: torch.Tensor, obs_mask: torch.Tensor, keep_prob: float = 0.92):
     keep_mask = make_random_keep_mask(obs_mask, keep_prob=keep_prob)
     target_mask = (obs_mask - keep_mask).clamp_min(0.0)
     masked_pupil = pupil * keep_mask
     return masked_pupil, keep_mask, target_mask
 
 
-def prepare_masked_fusion_batch(batch: Dict[str, torch.Tensor], keep_prob: float = 0.90) -> Dict[str, torch.Tensor]:
+def prepare_masked_fusion_batch(batch: Dict[str, torch.Tensor], keep_prob: float = 0.92) -> Dict[str, torch.Tensor]:
     pupil = batch["pupil"]
     obs_mask = batch["pupil_obs_mask"]
 
